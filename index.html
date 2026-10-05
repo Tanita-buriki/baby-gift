@@ -243,6 +243,7 @@
   <div class="sheet">
     <p>データはクラウドに保存され、同じアカウントでログインした端末どうしで自動的に同期されます。下のファイル書き出しは、念のためのバックアップ用です。</p>
     <p>ログイン中：<span id="userInfo"></span></p>
+    <button id="btnText">一覧をテキストファイルで出力</button>
     <button id="btnExport">データを書き出す（バックアップ）</button>
     <button id="btnImport">データを読み込む</button>
     <input type="file" id="fileImport" accept="application/json,.json" hidden>
@@ -571,21 +572,54 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
 $('btnBackup').addEventListener('click', () => $('dlgBackup').showModal());
 $('btnBackupClose').addEventListener('click', () => $('dlgBackup').close());
 
-$('btnExport').addEventListener('click', async () => {
-  const text = JSON.stringify({ app: 'shussan-iwai', version: 1, items }, null, 2);
+const today = () => {
   const d = new Date();
-  const name = `出産祝い管理_${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
-  const file = new File([text], name, { type: 'application/json' });
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+};
+async function saveFile(file) {
   // スマホでは共有メニュー（LINE・メール・ファイル保存など）を優先
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: name }); return; }
+    try { await navigator.share({ files: [file], title: file.name }); return; }
     catch (e) { if (e.name === 'AbortError') return; }
   }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(file);
-  a.download = name;
+  a.download = file.name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+$('btnExport').addEventListener('click', () => {
+  const text = JSON.stringify({ app: 'shussan-iwai', version: 1, items }, null, 2);
+  saveFile(new File([text], `出産祝い管理_${today()}.json`, { type: 'application/json' }));
+});
+
+// 一覧をテキストファイルで出力（一覧と同じ並び順。写真は枚数のみ）
+$('btnText').addEventListener('click', () => {
+  const sorted = [...items].sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.updatedAt - a.updatedAt);
+  const cashSum = items.reduce((s, it) => s + cashOf(it), 0);
+  const goodsSum = items.reduce((s, it) => s + goodsOf(it), 0);
+  const lines = [
+    '出産祝い一覧',
+    `出力日：${today().replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')}`,
+    `全 ${items.length} 件　お返し未了 ${items.filter((it) => !it.returned).length} 件`,
+    `現金のみ：${yen(cashSum)}円`,
+    `現金＋物品（概算）：${yen(cashSum + goodsSum)}円`,
+    '========================================',
+  ];
+  sorted.forEach((it, i) => {
+    const c = cashOf(it), g = goodsOf(it);
+    lines.push('', `${i + 1}. ${it.from}（${it.type || '物品'}）`);
+    lines.push(`   いただいた日：${it.date || '-'}`);
+    if (it.type !== '現金') lines.push(`   品物：${it.gift || '-'}${g ? `（目安${yen(g)}円）` : ''}`);
+    if (it.type === '現金' || it.type === '現金＋物品') lines.push(`   現金：${c ? yen(c) + '円' : '-'}`);
+    lines.push(`   お返し：${it.returned ? `済（${it.returnGift || '内容未入力'}／${it.returnDate || '-'}）` : '未'}`);
+    if (it.memo) lines.push(`   メモ：${it.memo.replace(/\s*\n\s*/g, ' ')}`);
+    if (it.photos && it.photos.length) lines.push(`   写真：${it.photos.length}枚`);
+  });
+  // Windowsのメモ帳でも文字化けしないよう、BOM付きUTF-8・改行はCRLFにする
+  const text = '﻿' + lines.join('\r\n') + '\r\n';
+  saveFile(new File([text], `出産祝い一覧_${today()}.txt`, { type: 'text/plain' }));
 });
 
 $('btnImport').addEventListener('click', () => $('fileImport').click());
