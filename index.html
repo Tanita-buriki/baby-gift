@@ -134,6 +134,19 @@
   #dlgPhoto { background: #000; }
   #dlgPhoto img { width: 100%; height: 100%; object-fit: contain; }
 
+  #login {
+    position: fixed; inset: 0; z-index: 100; background: var(--bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; text-align: center;
+  }
+  #login h2 { margin: 0 0 8px; color: var(--main-dark); }
+  #login p { color: var(--sub); line-height: 1.6; margin: 8px 0; }
+  #login button {
+    margin-top: 16px; padding: 14px 28px; font-size: 17px; font-weight: bold;
+    border: none; border-radius: 999px; background: var(--main); color: #fff;
+  }
+  #login.hidden { display: none; }
+
   .sheet { padding: 16px; }
   .sheet button {
     display: block; width: 100%; margin-top: 12px; padding: 14px; font-size: 16px;
@@ -223,38 +236,139 @@
 <dialog id="dlgBackup">
   <div class="dlg-head">保存・共有</div>
   <div class="sheet">
-    <p>データはこのスマホの中だけに保存されています。機種変更や、ご夫婦でのデータ共有には「書き出し」でファイルを作り、相手の端末で「読み込み」を行ってください。</p>
-    <button id="btnExport">データを書き出す（ファイル保存）</button>
+    <p>データはクラウドに保存され、同じアカウントでログインした端末どうしで自動的に同期されます。下のファイル書き出しは、念のためのバックアップ用です。</p>
+    <p>ログイン中：<span id="userInfo"></span></p>
+    <button id="btnExport">データを書き出す（バックアップ）</button>
     <button id="btnImport">データを読み込む</button>
     <input type="file" id="fileImport" accept="application/json,.json" hidden>
     <p>読み込み時は、今あるデータに追加されます。同じ記録は、更新日時が新しい方が残ります。</p>
+    <button id="btnLogout">ログアウト</button>
     <button id="btnBackupClose">閉じる</button>
   </div>
 </dialog>
 
-<script>
-'use strict';
-const KEY = 'shussan-iwai-v1';
+<!-- ログイン画面 -->
+<div id="login">
+  <h2>🎁 出産祝い管理</h2>
+  <p id="loginMsg">読み込み中…</p>
+  <button id="btnLogin" hidden>Googleでログイン</button>
+</div>
 
-// ---- データ保存 ----
-function load() {
-  try { return JSON.parse(localStorage.getItem(KEY)) || []; }
-  catch (e) { return []; }
-}
-function save(items) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(items));
-    return true;
-  } catch (e) {
-    alert('保存できませんでした。写真が多すぎる可能性があります。不要な写真を減らすか、データを書き出してから整理してください。');
-    return false;
-  }
-}
-let items = load();
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, onAuthStateChanged, signOut }
+  from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+         collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch }
+  from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+import { firebaseConfig } from './firebase-config.js';
+
+const LOCAL_KEY = 'shussan-iwai-v1'; // 旧：スマホ内保存版のデータ（移行用）
+const $ = (id) => document.getElementById(id);
+
+// ---- ログイン・データ同期（Firebase） ----
+const configured = !String(firebaseConfig.apiKey).startsWith('YOUR');
+let auth, db, giftsCol, unsub = null, migrationAsked = false;
+let items = [];
 let filter = 'all';
 let editingId = null;
 
-const $ = (id) => document.getElementById(id);
+function showLogin(msg, canLogin) {
+  $('login').classList.remove('hidden');
+  $('loginMsg').innerHTML = msg;
+  $('btnLogin').hidden = !canLogin;
+}
+
+if (!configured) {
+  showLogin('Firebase の接続設定（firebase-config.js）がまだ入力されていません。', false);
+} else {
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  // 端末内にもキャッシュを持つので、電波が悪い場所でも入力でき、つながった時に自動で反映される
+  db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+  giftsCol = collection(db, 'gifts');
+
+  onAuthStateChanged(auth, (user) => {
+    if (unsub) { unsub(); unsub = null; }
+    if (!user) {
+      items = [];
+      render();
+      showLogin('ご家族のGoogleアカウントでログインしてください。', true);
+      return;
+    }
+    $('userInfo').textContent = user.email || '';
+    unsub = onSnapshot(giftsCol, (snap) => {
+      items = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      $('login').classList.add('hidden');
+      render();
+      offerMigration();
+    }, (err) => {
+      if (err.code === 'permission-denied') {
+        showLogin(`このアカウント（${esc(user.email)}）は使用が許可されていません。<br>別のアカウントでログインしてください。`, true);
+        signOut(auth);
+      } else {
+        showLogin('データを読み込めませんでした。通信状況を確認して、再読み込みしてください。（' + esc(err.code) + '）', false);
+      }
+    });
+  });
+}
+
+$('btnLogin').addEventListener('click', async () => {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  try {
+    await signInWithPopup(auth, provider);
+  } catch (e) {
+    if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') {
+      signInWithRedirect(auth, provider);
+    } else if (e.code === 'auth/unauthorized-domain') {
+      alert('このURLがFirebaseの「承認済みドメイン」に登録されていません。設定を確認してください。');
+    } else if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') {
+      alert('ログインできませんでした。（' + e.code + '）');
+    }
+  }
+});
+$('btnLogout').addEventListener('click', async () => {
+  if (!confirm('ログアウトします。よろしいですか？')) return;
+  $('dlgBackup').close();
+  await signOut(auth);
+});
+
+// 記録を共有データへ追加（同じ記録は更新日時が新しい方を残す）。大きな写真が多くても通るよう少しずつ書き込む
+async function mergeItems(list) {
+  const todo = [];
+  let added = 0, updated = 0;
+  list.forEach(({ id, ...data }) => {
+    if (!id) return;
+    const cur = items.find((x) => x.id === id);
+    if (!cur) { todo.push([id, data]); added++; }
+    else if ((data.updatedAt || 0) > (cur.updatedAt || 0)) { todo.push([id, data]); updated++; }
+  });
+  for (let i = 0; i < todo.length; i += 10) {
+    const batch = writeBatch(db);
+    todo.slice(i, i + 10).forEach(([id, data]) => batch.set(doc(giftsCol, id), data));
+    await batch.commit();
+  }
+  return { added, updated };
+}
+
+// 旧バージョン（スマホ内保存）のデータがあれば、共有データへ移すか確認する
+function offerMigration() {
+  if (migrationAsked) return;
+  migrationAsked = true;
+  let local = [];
+  try { local = JSON.parse(localStorage.getItem(LOCAL_KEY)) || []; } catch (e) { /* 読めなければ移行しない */ }
+  if (!local.length) return;
+  if (!confirm(`この端末に保存されている ${local.length} 件を、共有データに追加しますか？\n（キャンセルすると、次回も確認します）`)) return;
+  mergeItems(local)
+    .then((r) => alert(`移行しました：追加 ${r.added} 件、更新 ${r.updated} 件\n（この端末内の元データは削除していません）`))
+    .catch((err) => alert('移行できませんでした。（' + (err.code || err.message) + '）'));
+}
+
+function showSaveError(err) {
+  alert('保存できませんでした。ログイン状態・通信状況・写真の容量を確認してください。（' + (err.code || err.message) + '）');
+}
+
 const yen = (n) => Number(n || 0).toLocaleString('ja-JP');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -322,7 +436,7 @@ function toggleType() {
 
 // ---- 写真 ----
 const MAX_PHOTOS = 3;
-const MAX_SIZE = 800; // 長辺のピクセル数（保存容量を抑えるため縮小）
+const MAX_SIZE = 640; // 長辺のピクセル数（1件約1MBの上限に収めるため縮小）
 let photos = [];
 
 function renderPhotos() {
@@ -343,7 +457,7 @@ function shrink(file) {
       c.height = Math.round(img.height * r);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(url);
-      resolve(c.toDataURL('image/jpeg', 0.7));
+      resolve(c.toDataURL('image/jpeg', 0.6));
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('画像を読み込めません')); };
     img.src = url;
@@ -383,7 +497,6 @@ $('form').addEventListener('submit', (e) => {
   e.preventDefault();
   const returned = $('fReturned').checked;
   const cash = $('fType').value === '現金';
-  const before = items;
   const data = {
     from: $('fFrom').value.trim(),
     type: $('fType').value,
@@ -397,23 +510,20 @@ $('form').addEventListener('submit', (e) => {
     returnDate: returned ? $('fReturnDate').value : '',
     updatedAt: Date.now(),
   };
-  if (editingId) {
-    items = items.map((x) => (x.id === editingId ? { ...x, ...data } : x));
-  } else {
-    items = [...items, { id: newId(), ...data }];
+  // 1件あたりの上限（約1MB）を超える場合は、入力画面を閉じずに知らせる
+  if (JSON.stringify(data).length > 900000) {
+    alert('写真の容量が大きすぎて保存できません。写真の枚数を減らしてください。');
+    return;
   }
-  // 容量超過などで保存できない場合は、入力画面を閉じずに元の状態へ戻す
-  if (!save(items)) { items = before; return; }
+  // 通信待ちで固まらないよう、保存の完了は待たずに画面を閉じる（失敗時は通知する）
+  setDoc(doc(giftsCol, editingId || newId()), data).catch(showSaveError);
   $('dlgEdit').close();
-  render();
 });
 
 $('btnDel').addEventListener('click', () => {
   if (!confirm('この記録を削除します。元に戻せません。よろしいですか？')) return;
-  items = items.filter((x) => x.id !== editingId);
-  save(items);
+  deleteDoc(doc(giftsCol, editingId)).catch(showSaveError);
   $('dlgEdit').close();
-  render();
 });
 
 $('fReturned').addEventListener('change', toggleReturn);
@@ -459,21 +569,11 @@ $('fileImport').addEventListener('change', async (e) => {
   try {
     const obj = JSON.parse(await f.text());
     if (obj.app !== 'shussan-iwai' || !Array.isArray(obj.items)) throw new Error('形式が違います');
-    let added = 0, updated = 0;
-    const before = [...items];
-    obj.items.forEach((inc) => {
-      const cur = items.find((x) => x.id === inc.id);
-      if (!cur) { items.push(inc); added++; }
-      else if ((inc.updatedAt || 0) > (cur.updatedAt || 0)) {
-        items = items.map((x) => (x.id === inc.id ? inc : x)); updated++;
-      }
-    });
-    if (!save(items)) { items = before; return; }
-    render();
+    const { added, updated } = await mergeItems(obj.items);
     $('dlgBackup').close();
     alert(`読み込み完了：追加 ${added} 件、更新 ${updated} 件`);
   } catch (err) {
-    alert('読み込めませんでした。このアプリで書き出したファイルを選んでください。');
+    alert('読み込めませんでした。このアプリで書き出したファイルを選んでください。（' + (err.code || err.message) + '）');
   }
 });
 
