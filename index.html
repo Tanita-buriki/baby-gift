@@ -358,10 +358,13 @@ function offerMigration() {
   migrationAsked = true;
   let local = [];
   try { local = JSON.parse(localStorage.getItem(LOCAL_KEY)) || []; } catch (e) { /* 読めなければ移行しない */ }
-  if (!local.length) return;
+  if (!local.length || localStorage.getItem(LOCAL_KEY + '-moved')) return;
   if (!confirm(`この端末に保存されている ${local.length} 件を、共有データに追加しますか？\n（キャンセルすると、次回も確認します）`)) return;
   mergeItems(local)
-    .then((r) => alert(`移行しました：追加 ${r.added} 件、更新 ${r.updated} 件\n（この端末内の元データは削除していません）`))
+    .then((r) => {
+      try { localStorage.setItem(LOCAL_KEY + '-moved', '1'); } catch (e) { /* 保存できなくても移行自体は完了 */ }
+      alert(`移行しました：追加 ${r.added} 件、更新 ${r.updated} 件\n（この端末内の元データは削除していません）`);
+    })
     .catch((err) => alert('移行できませんでした。（' + (err.code || err.message) + '）'));
 }
 
