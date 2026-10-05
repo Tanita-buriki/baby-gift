@@ -160,7 +160,9 @@
 <header>
   <h1>🎁 出産祝い管理</h1>
   <div class="summary">
-    全 <b id="sAll">0</b> 件　お返し未了 <b id="sTodo">0</b> 件　合計 <b id="sSum">0</b> 円
+    全 <b id="sAll">0</b> 件　お返し未了 <b id="sTodo">0</b> 件<br>
+    現金のみ　<b id="sCash">0</b> 円<br>
+    現金＋物品（概算）　<b id="sTotal">0</b> 円
   </div>
 </header>
 
@@ -198,8 +200,11 @@
     <label>いただいた日
       <input type="date" id="fDate">
     </label>
-    <label><span id="priceLabel">金額（目安・円）</span>
-      <input type="number" id="fPrice" inputmode="numeric" min="0" placeholder="例：5000">
+    <label id="cashBox">現金の金額（円）
+      <input type="number" id="fPrice" inputmode="numeric" min="0" placeholder="例：10000">
+    </label>
+    <label id="goodsBox">物品の目安金額（円）
+      <input type="number" id="fGoods" inputmode="numeric" min="0" placeholder="例：5000">
     </label>
     <label>写真（最大3枚）
       <input type="file" id="fPhoto" accept="image/*" multiple>
@@ -376,6 +381,19 @@ const yen = (n) => Number(n || 0).toLocaleString('ja-JP');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+// 金額の取り出し（現金／物品の目安額）。旧データの物品は price に目安額が入っているため、それも物品の目安額として扱う
+const cashOf = (it) => (it.type === '現金' || it.type === '現金＋物品') ? Number(it.price || 0) : 0;
+const goodsOf = (it) => it.type === '現金＋物品' ? Number(it.goods || 0)
+  : (it.type === '現金' ? 0 : Number(it.goods ?? it.price ?? 0));
+function amountText(it) {
+  const c = cashOf(it), g = goodsOf(it);
+  if (it.type === '現金') return '💴 現金' + (c ? `（${yen(c)}円）` : '');
+  if (it.type === '現金＋物品') {
+    return `💴🎁 現金${c ? ' ' + yen(c) + '円' : ''}＋${esc(it.gift)}${g ? `（目安${yen(g)}円）` : ''}`;
+  }
+  return '🎁 ' + esc(it.gift) + (g ? `（目安${yen(g)}円）` : '');
+}
+
 // ---- 一覧表示 ----
 function render() {
   const kw = $('q').value.trim().toLowerCase();
@@ -386,7 +404,10 @@ function render() {
 
   $('sAll').textContent = items.length;
   $('sTodo').textContent = items.filter((it) => !it.returned).length;
-  $('sSum').textContent = yen(items.reduce((s, it) => s + Number(it.price || 0), 0));
+  const cashSum = items.reduce((s, it) => s + cashOf(it), 0);
+  const goodsSum = items.reduce((s, it) => s + goodsOf(it), 0);
+  $('sCash').textContent = yen(cashSum);
+  $('sTotal').textContent = yen(cashSum + goodsSum);
 
   if (!shown.length) {
     $('list').innerHTML = '<div class="empty">' +
@@ -399,7 +420,7 @@ function render() {
         <span class="name">${esc(it.from)}</span>
         <span class="badge ${it.returned ? 'done' : 'todo'}">${it.returned ? 'お返し済' : 'お返し未'}</span>
       </div>
-      <div class="gift">${it.type === '現金' ? '💴 現金' : it.type === '現金＋物品' ? '💴🎁 現金＋' + esc(it.gift) : '🎁 ' + esc(it.gift)}${it.price ? '（' + yen(it.price) + '円）' : ''}</div>
+      <div class="gift">${amountText(it)}</div>
       <div class="meta">${it.date ? 'いただいた日：' + esc(it.date) : ''}</div>
       ${it.photos && it.photos.length ? `<div class="thumbs">${it.photos.map((p) => `<img src="${p}" alt="写真">`).join('')}</div>` : ''}
       ${it.returned ? `<div class="meta">お返し：${esc(it.returnGift) || '（内容未入力）'}${it.returnDate ? '／' + esc(it.returnDate) : ''}</div>` : ''}
@@ -417,7 +438,8 @@ function openEdit(id) {
   photos = [...(it.photos || [])];
   renderPhotos();
   $('fDate').value = it.date || new Date().toISOString().slice(0, 10);
-  $('fPrice').value = it.price ?? '';
+  $('fPrice').value = (it.type || '物品') === '物品' ? '' : (it.price ?? '');
+  $('fGoods').value = goodsOf(it) || '';
   $('fMemo').value = it.memo || '';
   $('fReturned').checked = !!it.returned;
   $('fReturnGift').value = it.returnGift || '';
@@ -427,14 +449,15 @@ function openEdit(id) {
   toggleReturn();
   $('dlgEdit').showModal();
 }
-// 種別が現金のときは品物欄を隠す
+// 種別に応じて、品物・現金・物品の目安金額の入力欄を出し分ける
 function toggleType() {
-  const cash = $('fType').value === '現金';
-  $('giftBox').style.display = cash ? 'none' : '';
-  $('fGift').required = !cash;
   const t = $('fType').value;
-  $('priceLabel').textContent = t === '現金' ? '金額（円）'
-    : t === '現金＋物品' ? '現金の金額（円）' : '金額（目安・円）';
+  const hasCash = t !== '物品';
+  const hasGoods = t !== '現金';
+  $('giftBox').style.display = hasGoods ? '' : 'none';
+  $('fGift').required = hasGoods;
+  $('cashBox').style.display = hasCash ? '' : 'none';
+  $('goodsBox').style.display = hasGoods ? '' : 'none';
 }
 
 // ---- 写真 ----
@@ -499,14 +522,15 @@ function toggleReturn() {
 $('form').addEventListener('submit', (e) => {
   e.preventDefault();
   const returned = $('fReturned').checked;
-  const cash = $('fType').value === '現金';
+  const type = $('fType').value;
   const data = {
     from: $('fFrom').value.trim(),
-    type: $('fType').value,
-    gift: cash ? '' : $('fGift').value.trim(),
+    type,
+    gift: type === '現金' ? '' : $('fGift').value.trim(),
     photos: [...photos],
     date: $('fDate').value,
-    price: $('fPrice').value === '' ? '' : Number($('fPrice').value),
+    price: type !== '物品' && $('fPrice').value !== '' ? Number($('fPrice').value) : '',
+    goods: type !== '現金' && $('fGoods').value !== '' ? Number($('fGoods').value) : '',
     memo: $('fMemo').value.trim(),
     returned,
     returnGift: returned ? $('fReturnGift').value.trim() : '',
